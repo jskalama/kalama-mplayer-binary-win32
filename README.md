@@ -1,2 +1,2 @@
-# mplayer-binary-win32
+# kalama-mplayer-binary-win32
 MPlayer binary downloader for windows
