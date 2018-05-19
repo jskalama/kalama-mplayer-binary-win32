@@ -1,30 +1,45 @@
+/*
+====================================*
+A_part of  _                        |
+| | ____ _| | __ _ _ __ ___   __ _  |
+| |/ / _` | |/ _` | '_ ` _ \ / _` | |
+|   < (_| | | (_| | | | | | | (_| | |
+|_|\_\__,_|_|\__,_|_| |_| |_|\__,_| |
+                           project. |
+                                    |
+   MPlayer downloader for Windows   |
+                                    |
+====================================*
+*/
+
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const unzip = require('unzip');
-const download = require('download');
+const tar = require('tar');
+const request = require('request');
+const md5File = require('md5-file');
 const ProgressReporter = require('./progressReporter');
 const release = require('./release');
 
-const basename = path.basename;
-const dirname = path.dirname;
-
-// //////
 
 const RELEASE_URL =
     'https://sourceforge.net/projects/mplayer-windows-builds/files/' +
     release.RELEASE_NAME +
-    '.zip/download';
+    '.tar.gz/download';
 const BIN_PATH = path.join(__dirname, 'bin');
 
 const E_DOWNLOAD = 'E_DOWNLOAD';
 const E_CHECKSUM = 'E_CHECKSUM';
 const E_UNZIP = 'E_UNZIP';
+const E_REMOVE = 'E_REMOVE';
 
 const exit = (e, type) => {
   switch (type) {
     case E_DOWNLOAD:
       console.error('Error downloading archive');
+      break;
+    case E_REMOVE:
+      console.error('Error removing archive');
       break;
     case E_CHECKSUM:
       console.error('Invalid checksum');
@@ -45,34 +60,75 @@ const report = (message) => {
   return Promise.resolve();
 };
 
-const verifyChecksum = () => {};
+const remove = file =>
+  new Promise((resolve, reject) =>
+    fs.unlink(file, (err) => {
+      if (err && err.code !== 'ENOENT') {
+        reject(err);
+      } else {
+        resolve();
+      }
+    }));
+
+const verifyChecksum = (archiveFile, md5Checksum) =>
+  new Promise((resolve, reject) => {
+    md5File(archiveFile, (err, hash) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      if (hash !== md5Checksum) {
+        reject(new Error('Invalid MD5 hash ' + hash));
+        return;
+      }
+      resolve();
+    });
+  });
 
 const unpackTo = (archiveFile, destFolder) => {
-  const stream = fs
-    .createReadStream(archiveFile)
-    .pipe(unzip.Extract({ path: destFolder }));
+  const progress = new ProgressReporter();
+  return tar
+    .extract({
+      cwd: destFolder,
+      file: archiveFile,
+      onentry: () => progress.progress(),
+    })
+    .then(() => progress.end());
+};
+
+const download = (from, to) => {
+  const stream = request(from);
+  stream.pipe(fs.createWriteStream(to));
+  const progress = new ProgressReporter();
   return new Promise((resolve, reject) => {
-    stream.on('end', () => resolve());
-    stream.on('error', () => reject());
+    stream.on('error', (err) => {
+      progress.end();
+      reject(err);
+    });
+    stream.on('data', () => { progress.progress(); });
+    stream.on('end', () => {
+      progress.end();
+      resolve();
+    });
   });
 };
 
 const fetchArchive = () => {
-  const progress = new ProgressReporter();
+  const tmpPath = path.join(os.tmpdir(), 'mplayer.tar.gz');
+  return report('Removing the file')
+    .then(() => remove(tmpPath))
+    .catch(e => exit(e, E_REMOVE))
 
-  const tmpPath = path.join(os.tmpdir(), 'mplayer.zip');
-  return report('Downloading archive ' + RELEASE_URL)
-    .then(() =>
-      download(RELEASE_URL, dirname(tmpPath), {
-        filename: basename(tmpPath),
-      })
-        .on('data', () => progress.progress())
-        .on('end', () => progress.end()))
+    .then(() => report('Downloading archive ' + RELEASE_URL))
+    .then(() => download(RELEASE_URL, tmpPath))
     .catch(e => exit(e, E_DOWNLOAD))
+
     .then(() => report('Verifying checksum ' + release.RELEASE_MD5))
     .then(() => verifyChecksum(tmpPath, release.RELEASE_MD5))
     .catch(e => exit(e, E_CHECKSUM))
-    .then(() => report('Unzipping to ' + path.join(BIN_PATH, release.RELEASE_NAME)))
+
+    .then(() =>
+      report('Unzipping to ' + path.join(BIN_PATH, release.RELEASE_NAME)))
     .then(() => unpackTo(tmpPath, BIN_PATH))
     .catch(e => exit(e, E_UNZIP));
 };
